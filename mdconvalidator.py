@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-
+import os
 import sys
 import argparse
 import logging
@@ -23,9 +23,11 @@ SCHEMAS = {
 EXT = {
     'tei': '.xml',
     'html': '.html',
+    'pdf': '.pdf'
 }
 # TODO: Validation fails w/o publisher. Make this configurable.
 PUBLISHER = 'Frederik Elwert, Ruhr University Bochum'
+# Additional pdf params example: { 'pdf': ['-V', 'geometry:margin=1.5cm']}
 
 
 class MDConvalidator:
@@ -34,10 +36,20 @@ class MDConvalidator:
     to TEI.
 
     """
+
     def __init__(self, infile, outfile):
         self.infile = infile
         self.outfile = outfile
         self.tempdir = tempfile.TemporaryDirectory()
+        self.use_citeproc = False
+
+    def __repr__(self):
+        return f'MarkdownConValidator:\n\tInput:\t{self.infile}\n'\
+               f'\tOutput:\t{self.outfile}'
+
+    def __str__(self):
+        return f'MarkdownConValidator:\n\tInput:\t{self.infile}\n'\
+               f'\tOutput:\t{self.outfile}'
 
     def _get_file_path(self, ext=None):
         file_path = Path(self.tempdir.name) / Path(self.outfile).name
@@ -45,14 +57,26 @@ class MDConvalidator:
             file_path = file_path.with_suffix(ext)
         return file_path
 
-    def convalidate(self, formats=['tei', 'html'], validate=['tei']):
+    def set_pandoc_path(self, pandoc_path='/usr/local/bin/pandoc'):
+        os.environ.setdefault('PYPANDOC_PANDOC', pandoc_path)
+        return 0
+
+    def convalidate(self, formats=['tei', 'html'], validate=['tei'],
+                    additional={'pdf': []}):
         # Convert into all given formats
         outfiles = {}
         for format_ in formats:
-            outfiles[format_] = self.convert(format_)
+            try:
+                outfiles[format_] = self.convert(format_, additional)
+            except():
+                print(f'Error on format {format_}.')
         # Validate given formats
+        logging.info(f'OUTFILES: {outfiles}')
         for format_ in validate:
-            self.validate(outfiles[format_], format_)
+            try:
+                self.validate(outfiles[format_], format_)
+            except():
+                print(f'Failed to validate {outfiles[format_]}.')
         # Copy infile
         # TODO: This uses different media paths than the extracted ones.
         # Maybe we should revise media handling to keep original file names.
@@ -65,11 +89,12 @@ class MDConvalidator:
                                       self.tempdir.name)
         shutil.copyfile(archive, self.outfile)
 
-    def convert(self, format_):
+    def convert(self, format_, additional):
         # Use infile directory as base for image paths and other resources
         basedir = Path(self.infile).parent
+        logging.info(f'BASEDIR: {basedir}')
         # We want relative paths for the media.
-        # Hence, we have to pass a relative path to pandoc, and not a 
+        # Hence, we have to pass a relative path to pandoc, and not a
         # child of self.tempdir.
         # This means it creates the media folder inside the current directory.
         # We make sure this does not override any existing directories.
@@ -80,8 +105,9 @@ class MDConvalidator:
             mediadircounter += 1
         # Common pipeline
         pandoc_filters = [
-            'pandoc-citeproc',
         ]
+        if self.use_citeproc:
+            pandoc_filters.append('pandoc-citeproc')
         pandoc_args = [
             '--standalone',
             f'--extract-media={mediadir}',
@@ -89,6 +115,10 @@ class MDConvalidator:
             f'--variable=publisher:"{PUBLISHER}"',
             f'--resource-path={basedir}',
         ]
+        if format_.lower() == 'pdf':
+            if 'pdf' in additional:
+                for each in additional['pdf']:
+                    pandoc_args.append(each)
         # Check if a custom template is configured
         if format_ in TEMPLATES:
             template = TEMPLATES[format_]
@@ -96,11 +126,13 @@ class MDConvalidator:
         # Get file name
         outfile = self._get_file_path(EXT[format_])
         # Do the conversion
-        output = pypandoc.convert_file(self.infile,
-                                       to=format_,
-                                       extra_args=pandoc_args,
-                                       filters=pandoc_filters,
-                                       outputfile=str(outfile))
+        logging.info(f'OUTFILE: {outfile}')
+        logging.info(f'INFILE: {self.infile}')
+        pypandoc.convert_file(self.infile,
+                              to=format_,
+                              extra_args=pandoc_args,
+                              filters=pandoc_filters,
+                              outputfile=f'{outfile}')
         logging.info(f'Converted {self.infile} to {outfile}.')
         # Move the media dir to tempdir.
         if Path(mediadir).exists():
@@ -120,6 +152,11 @@ class MDConvalidator:
         schema.assertValid(doctree)
         logging.info(f'Generated {format_} document is valid.')
 
+    def get_pandoc_info(self):
+        print(f'Pandoc version:\t{pypandoc.get_pandoc_version()}\n'
+              f'Pandoc path:\t{pypandoc.get_pandoc_path()}\n'
+              f'Pandoc formats:\t{pypandoc.get_pandoc_formats()}')
+
 
 def main():
     # Parse commandline arguments
@@ -127,6 +164,7 @@ def main():
     arg_parser.add_argument('-v', '--verbose', action='store_true')
     arg_parser.add_argument('infile')
     arg_parser.add_argument('outfile')
+    arg_parser.add_argument('use_citeproc')
     args = arg_parser.parse_args()
     # Set up logging
     if args.verbose:
@@ -136,6 +174,8 @@ def main():
     logging.basicConfig(level=level)
     # Return exit value
     mdc = MDConvalidator(args.infile, args.outfile)
+    if bool(args.use_citeproc):
+        mdc.use_citeproc = True
     mdc.convalidate()
     return 0
 
